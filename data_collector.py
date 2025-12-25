@@ -3,86 +3,214 @@ import requests
 from datetime import datetime, timedelta
 import os
 from typing import Optional, Dict, List
-from io import BytesIO
+import xml.etree.ElementTree as ET
+import json
 
 
 class RealEstateDataCollector:
     """한국부동산원 데이터 수집 클래스"""
     
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv('API_KEY')
-        # 공공데이터포털 파일 데이터 URL (실제 URL은 공공데이터포털에서 확인 필요)
-        self.base_url = "https://www.data.go.kr/download"
+        """
+        초기화
         
-    def generate_sample_data(self) -> pd.DataFrame:
-        """샘플 데이터 생성 (테스트용)"""
+        API 키 우선순위:
+        1. 직접 전달된 api_key
+        2. Streamlit Secrets (st.secrets.API_KEY)
+        3. 환경변수 (.env 파일 또는 시스템 환경변수)
+        """
+        if api_key:
+            self.api_key = api_key
+        else:
+            # Streamlit Secrets 확인
+            try:
+                import streamlit as st
+                self.api_key = st.secrets.get("API_KEY", None)
+            except (ImportError, FileNotFoundError, AttributeError):
+                # Streamlit이 없거나 secrets가 없는 경우 환경변수 사용
+                self.api_key = os.getenv('API_KEY')
         
-        # 날짜 생성 (최근 52주)
+        # 한국부동산원 R-ONE Open API 기본 URL
+        self.base_url = "https://api.reb.or.kr/r-one/openapi"
+        
+        # 시도 코드 매핑
+        self.sido_codes = {
+            '전국': '00',
+            '서울': '11',
+            '부산': '26',
+            '대구': '27',
+            '인천': '28',
+            '광주': '29',
+            '대전': '30',
+            '울산': '31',
+            '세종': '36',
+            '경기': '41',
+            '강원': '42',
+            '충북': '43',
+            '충남': '44',
+            '전북': '45',
+            '전남': '46',
+            '경북': '47',
+            '경남': '48',
+            '제주': '50'
+        }
+    
+    def fetch_weekly_price_index(self, 
+                                 sido: str = '전국',
+                                 weeks: int = 12) -> pd.DataFrame:
+        """
+        주간 아파트 가격지수 조회
+        
+        Parameters:
+        - sido: 시도명 (예: '서울', '부산', '전국')
+        - weeks: 조회할 주 수 (기본 12주)
+        
+        Returns:
+        - DataFrame: 주간 가격지수 데이터
+        """
+        if not self.api_key:
+            raise ValueError("API 키가 필요합니다. .env 파일에 API_KEY를 설정하거나 초기화시 전달하세요.")
+        
+        # 조회 기간 설정
         end_date = datetime.now()
-        dates = [end_date - timedelta(weeks=i) for i in range(52, 0, -1)]
+        start_date = end_date - timedelta(weeks=weeks)
         
-        # 주요 지역
-        regions = [
-            {'sido': '전국', 'sigungu': '전체'},
-            {'sido': '서울', 'sigungu': '전체'},
-            {'sido': '서울', 'sigungu': '강남구'},
-            {'sido': '서울', 'sigungu': '서초구'},
-            {'sido': '서울', 'sigungu': '송파구'},
-            {'sido': '경기', 'sigungu': '전체'},
-            {'sido': '경기', 'sigungu': '성남시'},
-            {'sido': '경기', 'sigungu': '고양시'},
-            {'sido': '인천', 'sigungu': '전체'},
-            {'sido': '부산', 'sigungu': '전체'},
-            {'sido': '대구', 'sigungu': '전체'},
-            {'sido': '대전', 'sigungu': '전체'},
-            {'sido': '광주', 'sigungu': '전체'},
-        ]
+        # 시도 코드 가져오기
+        sido_code = self.sido_codes.get(sido, '00')
         
-        data = []
+        all_data = []
         
-        for region in regions:
-            # 기준 지수 (100 기준)
-            base_index = 100
-            
-            # 지역별 변동성 설정
-            if region['sido'] == '서울':
-                trend = 0.15  # 상승 추세
-                volatility = 0.3
-            elif region['sido'] == '경기':
-                trend = 0.12
-                volatility = 0.25
-            else:
-                trend = 0.08
-                volatility = 0.2
-            
-            매매_index = base_index
-            전세_index = base_index
-            
-            for i, date in enumerate(dates):
-                # 주간 변동률 생성
-                import random
-                random.seed(hash(f"{region['sido']}{region['sigungu']}{i}") % 10000)
+        # 주간 데이터는 보통 매주 목요일 기준으로 발표
+        # 각 주차별로 데이터 수집
+        current_date = start_date
+        while current_date <= end_date:
+            try:
+                # 주간 데이터 조회
+                weekly_data = self._fetch_single_week_data(
+                    sido_code=sido_code,
+                    date=current_date
+                )
                 
-                매매_변동 = trend + random.uniform(-volatility, volatility)
-                전세_변동 = trend * 0.7 + random.uniform(-volatility, volatility)
+                if weekly_data:
+                    all_data.extend(weekly_data)
                 
-                매매_index = 매매_index * (1 + 매매_변동/100)
-                전세_index = 전세_index * (1 + 전세_변동/100)
+                # 1주일씩 증가
+                current_date += timedelta(weeks=1)
                 
-                data.append({
-                    '조사일': date.strftime('%Y-%m-%d'),
-                    '시도': region['sido'],
-                    '시군구': region['sigungu'],
-                    '매매가격지수': round(매매_index, 2),
-                    '매매주간변동률': round(매매_변동, 3),
-                    '전세가격지수': round(전세_index, 2),
-                    '전세주간변동률': round(전세_변동, 3),
-                })
+            except Exception as e:
+                print(f"데이터 조회 중 오류 ({current_date.strftime('%Y-%m-%d')}): {str(e)}")
+                current_date += timedelta(weeks=1)
+                continue
         
-        df = pd.DataFrame(data)
+        if not all_data:
+            print("조회된 데이터가 없습니다. API 키와 네트워크를 확인하세요.")
+            return pd.DataFrame()
+        
+        # DataFrame 변환
+        df = pd.DataFrame(all_data)
         df['조사일'] = pd.to_datetime(df['조사일'])
         
         return df
+    
+    def _fetch_single_week_data(self, sido_code: str, date: datetime) -> List[Dict]:
+        """
+        특정 주의 데이터 조회 (내부 메서드)
+        """
+        # API 엔드포인트 (실제 엔드포인트는 한국부동산원 문서 참조)
+        endpoint = f"{self.base_url}/weeklyHousingPrice"
+        
+        # 파라미터 설정
+        params = {
+            'serviceKey': self.api_key,
+            'sidoCode': sido_code,
+            'inqDate': date.strftime('%Y%m%d'),
+            'numOfRows': 100,
+            'pageNo': 1,
+            'type': 'json'  # json 또는 xml
+        }
+        
+        try:
+            response = requests.get(endpoint, params=params, timeout=30)
+            response.raise_for_status()
+            
+            # JSON 응답 파싱
+            data = response.json()
+            
+            # 응답 구조는 API 문서에 따라 다를 수 있음
+            # 일반적인 공공데이터 포털 구조 가정
+            if 'response' in data:
+                items = data['response'].get('body', {}).get('items', {}).get('item', [])
+                
+                # item이 단일 딕셔너리인 경우 리스트로 변환
+                if isinstance(items, dict):
+                    items = [items]
+                
+                # 데이터 변환
+                processed_items = []
+                for item in items:
+                    processed_items.append({
+                        '조사일': date.strftime('%Y-%m-%d'),
+                        '시도': self._get_sido_name(item.get('sidoCode', sido_code)),
+                        '시군구': item.get('sigunguName', '전체'),
+                        '매매가격지수': float(item.get('saleIndex', 0)),
+                        '매매주간변동률': float(item.get('saleChangeRate', 0)),
+                        '전세가격지수': float(item.get('jeonseIndex', 0)),
+                        '전세주간변동률': float(item.get('jeonseChangeRate', 0)),
+                    })
+                
+                return processed_items
+            
+            return []
+            
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"API 호출 실패: {str(e)}")
+        except (KeyError, ValueError) as e:
+            raise Exception(f"응답 데이터 파싱 실패: {str(e)}")
+    
+    def _get_sido_name(self, sido_code: str) -> str:
+        """시도 코드로 시도명 찾기"""
+        for name, code in self.sido_codes.items():
+            if code == sido_code:
+                return name
+        return '알수없음'
+    
+    def fetch_multiple_regions(self, 
+                              sidos: List[str] = None,
+                              weeks: int = 12) -> pd.DataFrame:
+        """
+        여러 지역의 데이터 한번에 조회
+        
+        Parameters:
+        - sidos: 시도 리스트 (None인 경우 전국 데이터만 조회)
+        - weeks: 조회할 주 수
+        
+        Returns:
+        - DataFrame: 통합된 가격지수 데이터
+        """
+        if sidos is None:
+            sidos = ['전국']
+        
+        all_dataframes = []
+        
+        for sido in sidos:
+            print(f"{sido} 데이터 조회 중...")
+            try:
+                df = self.fetch_weekly_price_index(sido=sido, weeks=weeks)
+                if not df.empty:
+                    all_dataframes.append(df)
+            except Exception as e:
+                print(f"{sido} 조회 실패: {str(e)}")
+                continue
+        
+        if not all_dataframes:
+            print("조회된 데이터가 없습니다.")
+            return pd.DataFrame()
+        
+        # 모든 데이터 통합
+        combined_df = pd.concat(all_dataframes, ignore_index=True)
+        combined_df = combined_df.sort_values(['조사일', '시도', '시군구'])
+        
+        return combined_df
     
     def fetch_data_from_file(self, file_path: str) -> pd.DataFrame:
         """
@@ -97,58 +225,33 @@ class RealEstateDataCollector:
             else:
                 raise ValueError("지원하지 않는 파일 형식입니다. CSV 또는 XLSX 파일을 사용하세요.")
             
+            # 날짜 컬럼 변환
+            if '조사일' in df.columns:
+                df['조사일'] = pd.to_datetime(df['조사일'])
+            
             return df
         except Exception as e:
             print(f"파일 로드 중 오류 발생: {str(e)}")
             return None
     
-    def fetch_data_from_api(self, 
-                           start_date: str, 
-                           end_date: str,
-                           region_code: Optional[str] = None) -> pd.DataFrame:
-        """
-        공공데이터포털 API에서 데이터 가져오기
-        
-        Parameters:
-        - start_date: 시작일 (YYYYMMDD)
-        - end_date: 종료일 (YYYYMMDD)
-        - region_code: 지역코드 (선택사항)
-        """
+    def test_api_connection(self) -> bool:
+        """API 연결 테스트"""
         if not self.api_key:
-            raise ValueError("API 키가 설정되지 않았습니다.")
-        
-        # 실제 API 엔드포인트는 공공데이터포털 문서 참조
-        # 여기서는 예시 구조를 보여줍니다
-        params = {
-            'serviceKey': self.api_key,
-            'startDate': start_date,
-            'endDate': end_date,
-            'numOfRows': 1000,
-            'pageNo': 1,
-            'type': 'json'
-        }
-        
-        if region_code:
-            params['regionCode'] = region_code
+            print("❌ API 키가 설정되지 않았습니다.")
+            return False
         
         try:
-            response = requests.get(self.base_url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            # JSON 응답 파싱 (실제 구조는 API 문서 참조)
-            data = response.json()
-            
-            # 데이터프레임 변환
-            if 'items' in data:
-                df = pd.DataFrame(data['items'])
-                return df
+            # 간단한 테스트 요청
+            df = self.fetch_weekly_price_index(sido='전국', weeks=1)
+            if not df.empty:
+                print("✅ API 연결 성공!")
+                return True
             else:
-                print("데이터를 찾을 수 없습니다.")
-                return pd.DataFrame()
-                
-        except requests.exceptions.RequestException as e:
-            print(f"API 호출 중 오류 발생: {str(e)}")
-            return pd.DataFrame()
+                print("⚠️ API 연결은 되었으나 데이터가 없습니다.")
+                return False
+        except Exception as e:
+            print(f"❌ API 연결 실패: {str(e)}")
+            return False
     
     def save_data(self, df: pd.DataFrame, file_path: str):
         """데이터를 파일로 저장"""
@@ -188,24 +291,59 @@ class RealEstateDataCollector:
 
 def main():
     """테스트 코드"""
-    collector = RealEstateDataCollector()
+    print("=== 한국부동산원 데이터 수집기 테스트 ===\n")
     
-    # 샘플 데이터 생성
-    print("샘플 데이터 생성 중...")
-    df = collector.generate_sample_data()
+    # API 키 확인
+    api_key = os.getenv('API_KEY')
+    if not api_key:
+        print("⚠️  API 키가 설정되지 않았습니다.")
+        print("📝 .env 파일에 API_KEY를 설정하거나 환경변수를 설정하세요.")
+        print("\n사용 예시:")
+        print("1. .env 파일 생성:")
+        print("   API_KEY=your_api_key_here")
+        print("\n2. 환경변수 설정:")
+        print("   export API_KEY=your_api_key_here  # Linux/Mac")
+        print("   set API_KEY=your_api_key_here     # Windows")
+        return
     
-    # 데이터 저장
-    os.makedirs('data', exist_ok=True)
-    collector.save_data(df, 'data/sample_data.csv')
+    collector = RealEstateDataCollector(api_key)
     
-    # 통계 출력
-    stats = collector.calculate_statistics(df)
-    print("\n=== 데이터 통계 ===")
-    for key, value in stats.items():
-        print(f"{key}: {value}")
+    # API 연결 테스트
+    print("1. API 연결 테스트")
+    print("-" * 50)
+    collector.test_api_connection()
     
-    print("\n데이터 샘플:")
-    print(df.head(10))
+    # 데이터 수집
+    print("\n2. 데이터 수집 (전국, 최근 4주)")
+    print("-" * 50)
+    try:
+        df = collector.fetch_weekly_price_index(sido='전국', weeks=4)
+        
+        if not df.empty:
+            print(f"✅ 데이터 수집 성공! ({len(df)}개 레코드)")
+            
+            # 데이터 저장
+            os.makedirs('data', exist_ok=True)
+            collector.save_data(df, 'data/real_estate_data.csv')
+            
+            # 통계 출력
+            stats = collector.calculate_statistics(df)
+            print("\n=== 데이터 통계 ===")
+            for key, value in stats.items():
+                print(f"{key}: {value}")
+            
+            print("\n=== 데이터 샘플 ===")
+            print(df.head(10))
+        else:
+            print("⚠️  데이터가 조회되지 않았습니다.")
+            print("API 키 또는 엔드포인트를 확인하세요.")
+            
+    except Exception as e:
+        print(f"❌ 오류 발생: {str(e)}")
+        print("\n문제 해결:")
+        print("1. API 키가 올바른지 확인하세요")
+        print("2. 한국부동산원 R-ONE에서 인증키를 발급받으셨는지 확인하세요")
+        print("3. 네트워크 연결을 확인하세요")
 
 
 if __name__ == "__main__":
