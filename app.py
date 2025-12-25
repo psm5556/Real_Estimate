@@ -44,16 +44,73 @@ st.markdown("---")
 @st.cache_data(ttl=3600)
 def load_data():
     """데이터 로드 (캐싱 적용)"""
-    collector = RealEstateDataCollector()
+    # API 키 확인 (Streamlit Secrets 우선)
+    api_key = None
     
-    # 샘플 데이터 사용 또는 실제 파일에서 로드
-    if os.path.exists('data/sample_data.csv'):
-        df = pd.read_csv('data/sample_data.csv')
+    # 1. Streamlit Secrets 확인
+    try:
+        api_key = st.secrets["API_KEY"]
+    except (KeyError, FileNotFoundError):
+        # 2. 환경변수 확인
+        api_key = os.getenv('API_KEY')
+    
+    if not api_key:
+        st.error("""
+        ### ⚠️ API 키가 설정되지 않았습니다
+        
+        **Streamlit Cloud에서:**
+        1. 앱 대시보드 → ⚙️ Settings → Secrets
+        2. 다음 내용 추가:
+        ```
+        API_KEY = "your_api_key_here"
+        ```
+        
+        **로컬 개발에서:**
+        1. `.env` 파일 생성
+        2. `API_KEY=your_api_key_here` 추가
+        
+        **API 키 발급:**
+        - [한국부동산원 R-ONE](https://www.reb.or.kr/r-one) 접속
+        - Open API → 인증키 발급
+        """)
+        return pd.DataFrame()
+    
+    collector = RealEstateDataCollector(api_key)
+    
+    # 로컬 캐시 파일 확인
+    cache_file = 'data/cached_data.csv'
+    use_cache = False
+    
+    if os.path.exists(cache_file):
+        # 캐시 파일이 1시간 이내인 경우 사용
+        file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
+        if (datetime.now() - file_time).seconds < 3600:
+            use_cache = True
+    
+    if use_cache:
+        st.info("📦 캐시된 데이터를 사용합니다.")
+        df = pd.read_csv(cache_file)
         df['조사일'] = pd.to_datetime(df['조사일'])
     else:
-        df = collector.generate_sample_data()
-        os.makedirs('data', exist_ok=True)
-        df.to_csv('data/sample_data.csv', index=False, encoding='utf-8-sig')
+        try:
+            with st.spinner('API에서 데이터를 불러오는 중...'):
+                # 주요 지역 데이터 수집
+                sidos = ['전국', '서울', '부산', '대구', '인천', '광주', '대전', '경기']
+                df = collector.fetch_multiple_regions(sidos=sidos, weeks=52)
+                
+                if df.empty:
+                    st.warning("데이터를 불러올 수 없습니다. API 키와 연결을 확인하세요.")
+                    return pd.DataFrame()
+                
+                # 캐시 저장
+                os.makedirs('data', exist_ok=True)
+                df.to_csv(cache_file, index=False, encoding='utf-8-sig')
+                st.success(f"✅ 데이터 로드 완료! ({len(df)} 건)")
+                
+        except Exception as e:
+            st.error(f"❌ 데이터 로드 실패: {str(e)}")
+            st.info("API 키를 확인하거나 한국부동산원 R-ONE에서 인증키를 발급받으세요.")
+            return pd.DataFrame()
     
     return df
 
@@ -355,9 +412,47 @@ else:
 
 # 푸터
 st.markdown("---")
+
+# API 키 설정 상태 확인 및 안내
+api_key_set = False
+try:
+    if st.secrets.get("API_KEY"):
+        api_key_set = True
+except (KeyError, FileNotFoundError):
+    if os.getenv('API_KEY'):
+        api_key_set = True
+
+if not api_key_set:
+    st.warning("""
+        ### ⚠️ API 키를 설정하세요
+        
+        **Streamlit Cloud 배포 시 (권장):**
+        1. 앱 대시보드에서 ⚙️ **Settings** 클릭
+        2. **Secrets** 탭 선택
+        3. 다음 내용 입력:
+        ```toml
+        API_KEY = "발급받은_인증키"
+        ```
+        4. **Save** 클릭
+        
+        **로컬 개발 시:**
+        1. 프로젝트 폴더에 `.env` 파일 생성
+        2. 다음 내용 입력:
+        ```
+        API_KEY=발급받은_인증키
+        ```
+        
+        **API 키 발급 방법:**
+        1. [한국부동산원 R-ONE](https://www.reb.or.kr/r-one) 접속
+        2. 회원가입 후 로그인
+        3. **Open API** → **인증키 발급** 메뉴
+        4. 신청 양식 작성 및 발급
+    """)
+else:
+    st.success("✅ API 키가 설정되었습니다.")
+
 st.markdown("""
-    <div style='text-align: center; color: gray; font-size: 0.9rem;'>
-        <p>데이터 출처: 한국부동산원 | 업데이트: 매주 목요일</p>
-        <p>⚠️ 본 데이터는 샘플 데이터이며, 실제 서비스 시 공공데이터포털 API 연동이 필요합니다.</p>
+    <div style='text-align: center; color: gray; font-size: 0.9rem; margin-top: 2rem;'>
+        <p>데이터 출처: 한국부동산원 R-ONE Open API | 업데이트: 매주 목요일</p>
     </div>
 """, unsafe_allow_html=True)
