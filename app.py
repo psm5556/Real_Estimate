@@ -690,7 +690,7 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str, mod
         colorscale='RdYlGn',  # 빨강(하락)-노랑(중립)-초록(상승)
         zmid=0,  # 0을 중간값으로
         colorbar=dict(title=colorbar_title),
-        hovertemplate='지역: %{y}<br>날짜: %{x|%Y-%m-%d}<br>' + colorbar_title + ': %{z:.2f}%<extra></extra>',
+        hovertemplate='지역: %{y}<br>날짜: %{x|%Y-%m-%d}<br>' + colorbar_title + ': %{z:.3f}%<extra></extra>',
         zmin=zmin,
         zmax=zmax,
     ))
@@ -769,16 +769,19 @@ def main():
             "지역",
             options=region_list,
             default=[
-                '서울',
-                '경기',
+                # '서울',
+                # '경기',
                 '서울>강남지역',
                 '서울>강북지역',
                 '경기>경부1권>성남시>분당구',
+                '경기>경부1권>과천시'
                 '경기>경부2권>수원시>영통구',
                 '경기>경부2권>용인시>수지구',
-                '경기>서해안권>평택시',
                 '인천>연수구',
-                '부산>동부산권>해운대구'
+                '경기>서해안권>평택시',
+                '세종',
+                '대구>수성구',
+                '부산>동부산권>해운대구',
             ],
             label_visibility="collapsed"
         )
