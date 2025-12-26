@@ -679,7 +679,7 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str, mod
     else:  # 전주 변동률
         mode_text = "전주 대비"
         st.info(f"📅 총 {total_weeks}주 데이터 표시 중 (전주 대비 변동률)")
-        zmin, zmax = -2, 2  # 전주 변동률은 보통 작은 값
+        zmin, zmax = -1, 1  # 전주 변동률은 -1% ~ +1%
         colorbar_title = "전주 변동률(%)"
     
     # 히트맵 생성
@@ -797,7 +797,7 @@ def main():
     if period == "사용자 지정":
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            default_start = datetime.now() - timedelta(days=365)
+            default_start = datetime(2013, 8, 5)  # 2013년 8월 5일
             custom_start = st.date_input(
                 "시작일",
                 value=default_start,
