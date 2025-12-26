@@ -330,9 +330,12 @@ class PriceIndexAPI:
             df = pd.DataFrame(rows)
             
             # 주간 데이터 처리
-            # API에서 제공한 날짜를 그대로 사용 (주간 데이터의 기준일)
-            if 'WRTTIME_IDTFR_ID' in df.columns:
+            # WRTTIME_DESC가 실제 날짜 (YYYY-MM-DD 형식)
+            if 'WRTTIME_DESC' in df.columns:
                 df['날짜'] = pd.to_datetime(df['WRTTIME_DESC'], format='%Y-%m-%d', errors='coerce')
+            elif 'WRTTIME_IDTFR_ID' in df.columns:
+                # WRTTIME_DESC가 없으면 WRTTIME_IDTFR_ID 사용
+                df['날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
             
             # 숫자 변환
             if 'DTA_VAL' in df.columns:
