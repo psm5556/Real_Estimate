@@ -329,19 +329,23 @@ class PriceIndexAPI:
             
             df = pd.DataFrame(rows)
             
-            # 주간 데이터이므로 해당 주의 시작일(월요일) 기준으로 날짜 변환
+            # !! 중요: 주간 데이터 처리
+            # API에서 받은 WRTTIME_IDTFR_ID는 해당 주를 대표하는 날짜 (보통 주의 특정 요일)
+            # 주간 데이터이므로 날짜를 그대로 사용 (API가 주 단위로 제공)
             if 'WRTTIME_IDTFR_ID' in df.columns:
-                # YYYYMMDD 형식을 날짜로 변환
-                df['원본날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
-                # 해당 날짜가 속한 주의 월요일을 계산 (ISO 8601 기준)
-                df['날짜'] = df['원본날짜'] - pd.to_timedelta(df['원본날짜'].dt.weekday, unit='d')
+                df['날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
+                df['연도'] = df['날짜'].dt.isocalendar().year
+                df['주차'] = df['날짜'].dt.isocalendar().week
+                
+                # 중복 데이터 제거 - 같은 연도/주차의 데이터가 여러 개 있을 경우 최신 것만 사용
+                df = df.sort_values('날짜').drop_duplicates(subset=['연도', '주차'], keep='last')
             
             # 숫자 변환
             if 'DTA_VAL' in df.columns:
                 df['지수'] = pd.to_numeric(df['DTA_VAL'], errors='coerce')
             
             # 필요한 컬럼만 선택
-            df = df[['날짜', '지수', '원본날짜']].copy()
+            df = df[['날짜', '지수', '연도', '주차']].copy()
             df['가격유형'] = price_type
             
             # 정렬
@@ -537,101 +541,92 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def create_statistics_table(df: pd.DataFrame, regions: List[str]):
-    """통계 테이블 생성"""
+def create_heatmap(df: pd.DataFrame, regions: List[str], chart_type: str):
+    """지역별 시계열 증감률 히트맵"""
+    
+    if df.empty:
+        st.warning("히트맵을 그릴 데이터가 없습니다.")
+        return
+    
+    # 차트 유형에 따라 데이터 필터링
+    if chart_type == "매매":
+        df_filtered = df[df['가격유형'] == '매매'].copy()
+        title_suffix = "매매 가격지수"
+    elif chart_type == "전세":
+        df_filtered = df[df['가격유형'] == '전세'].copy()
+        title_suffix = "전세 가격지수"
+    else:  # 매매/전세
+        # 매매와 전세 각각 히트맵 생성
+        for price_type, suffix in [('매매', '매매 가격지수'), ('전세', '전세 가격지수')]:
+            df_type = df[df['가격유형'] == price_type].copy()
+            if not df_type.empty:
+                _create_single_heatmap(df_type, regions, f"{suffix} 시계열 히트맵")
+        return
+    
+    _create_single_heatmap(df_filtered, regions, f"{title_suffix} 시계열 히트맵")
+
+
+def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
+    """단일 히트맵 생성 (내부 함수)"""
     
     if df.empty:
         return
     
-    stats_list = []
-    
-    for region in regions:
-        region_data = df[df['지역'] == region]
-        
-        for price_type in ['매매', '전세']:
-            type_data = region_data[region_data['가격유형'] == price_type]
-            
-            if not type_data.empty:
-                latest = type_data.iloc[-1]['지수']
-                earliest = type_data.iloc[0]['지수']
-                change = latest - earliest
-                change_pct = (change / earliest) * 100 if earliest != 0 else 0
-                
-                stats_list.append({
-                    '지역': region,
-                    '유형': price_type,
-                    '최초지수': f"{earliest:.2f}",
-                    '최근지수': f"{latest:.2f}",
-                    '변화': f"{change:+.2f}",
-                    '변화율(%)': f"{change_pct:+.2f}%"
-                })
-    
-    if stats_list:
-        stats_df = pd.DataFrame(stats_list)
-        st.dataframe(stats_df, use_container_width=True, hide_index=True)
-
-
-def create_heatmap(df: pd.DataFrame, regions: List[str]):
-    """지역별 증감률 히트맵"""
-    
-    if df.empty:
-        return
-    
-    # 지역별, 가격유형별 증감률 계산
+    # 각 지역의 최초 지수를 기준으로 변화율 계산
     heatmap_data = []
     
     for region in regions:
-        region_data = df[df['지역'] == region]
-        row_data = {'지역': region}
+        region_data = df[df['지역'] == region].sort_values('날짜')
         
-        for price_type in ['매매', '전세']:
-            type_data = region_data[region_data['가격유형'] == price_type]
+        if not region_data.empty and len(region_data) > 0:
+            # 최초 지수
+            base_index = region_data.iloc[0]['지수']
             
-            if not type_data.empty:
-                latest = type_data.iloc[-1]['지수']
-                earliest = type_data.iloc[0]['지수']
-                change_pct = ((latest - earliest) / earliest) * 100 if earliest != 0 else 0
-                row_data[f'{price_type} 증감률(%)'] = change_pct
-            else:
-                row_data[f'{price_type} 증감률(%)'] = None
-        
-        heatmap_data.append(row_data)
+            if base_index and base_index > 0:
+                # 각 시점의 변화율 계산
+                region_data = region_data.copy()
+                region_data['변화율'] = ((region_data['지수'] - base_index) / base_index) * 100
+                region_data['지역'] = region
+                heatmap_data.append(region_data[['날짜', '지역', '변화율']])
     
     if not heatmap_data:
+        st.warning("히트맵을 그릴 데이터가 없습니다.")
         return
     
-    heatmap_df = pd.DataFrame(heatmap_data)
+    # 데이터 결합
+    combined_df = pd.concat(heatmap_data, ignore_index=True)
     
-    # 증감률 컬럼만 추출
-    value_columns = [col for col in heatmap_df.columns if '증감률' in col]
+    # 피벗 테이블 생성: 날짜(x축) x 지역(y축)
+    pivot_df = combined_df.pivot(index='지역', columns='날짜', values='변화율')
     
-    if not value_columns:
-        return
+    # 지역 순서 유지
+    pivot_df = pivot_df.reindex(regions)
     
     # 히트맵 생성
     fig = go.Figure(data=go.Heatmap(
-        z=heatmap_df[value_columns].values.T,
-        x=heatmap_df['지역'],
-        y=value_columns,
+        z=pivot_df.values,
+        x=pivot_df.columns,
+        y=pivot_df.index,
         colorscale='RdYlGn',  # 빨강(하락)-노랑(중립)-초록(상승)
         zmid=0,  # 0을 중간값으로
-        text=heatmap_df[value_columns].values.T,
-        texttemplate='%{text:.2f}%',
-        textfont={"size": 10},
-        colorbar=dict(title="증감률(%)")
+        colorbar=dict(title="변화율(%)"),
+        hovertemplate='지역: %{y}<br>날짜: %{x|%Y-%m-%d}<br>변화율: %{z:.2f}%<extra></extra>',
+        zmin=-10,  # 최소값 (더 명확한 색상 구분)
+        zmax=10,   # 최대값
     ))
     
     fig.update_layout(
-        title="지역별 가격지수 증감률 히트맵",
-        xaxis_title="지역",
-        yaxis_title="가격유형",
-        height=300,
-        xaxis={'side': 'bottom'},
-        margin=dict(l=150, r=50, t=80, b=100)
+        title=title,
+        xaxis_title="날짜 (주간)",
+        yaxis_title="지역",
+        height=max(400, len(regions) * 25),  # 지역 수에 따라 높이 조정
+        xaxis={
+            'tickformat': '%Y-%m-%d',
+            'tickangle': -45,
+            'dtick': 7 * 24 * 60 * 60 * 1000 * 4  # 약 4주마다 표시
+        },
+        margin=dict(l=200, r=50, t=80, b=100)
     )
-    
-    # x축 레이블 회전
-    fig.update_xaxes(tickangle=-45)
     
     st.plotly_chart(fig, use_container_width=True)
 
@@ -754,13 +749,10 @@ def main():
             create_chart(df, chart_type, selected_regions)
         
         with tab2:
-            # 통계 테이블
-            st.subheader("주요 통계")
-            create_statistics_table(df, selected_regions)
-            
-            # 증감률 히트맵
-            st.subheader("지역별 증감률 히트맵")
-            create_heatmap(df, selected_regions)
+            # 증감률 히트맵만 표시
+            st.subheader("시계열 증감률 히트맵")
+            st.info("📊 최초 시점 대비 각 시점의 변화율을 색상으로 표시합니다. (빨강: 하락, 초록: 상승)")
+            create_heatmap(df, selected_regions, chart_type)
         
         with tab3:
             # 원본 데이터 표시
