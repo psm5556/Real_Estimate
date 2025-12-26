@@ -17,6 +17,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+
+def date_to_week_format(date_obj: datetime) -> str:
+    """
+    날짜를 YYYYWW 형식으로 변환
+    예: 2025-12-26 → 202552 (2025년 52주차)
+    """
+    year = date_obj.isocalendar()[0]  # ISO 연도
+    week = date_obj.isocalendar()[1]  # ISO 주차
+    return f"{year}{week:02d}"
+
+
 class PriceIndexAPI:
     """부동산 가격지수 API 클래스"""
     
@@ -421,16 +432,6 @@ def load_data(api_key: str, price_types: List[str], start_date: str, end_date: s
     return api.get_multiple_data(price_types, start_date, end_date, regions)
 
 
-def date_to_week_format(date_obj: datetime) -> str:
-    """
-    날짜를 YYYYWW 형식으로 변환
-    예: 2025-12-26 → 202552 (2025년 52주차)
-    """
-    year = date_obj.isocalendar()[0]  # ISO 연도
-    week = date_obj.isocalendar()[1]  # ISO 주차
-    return f"{year}{week:02d}"
-
-
 def calculate_date_range(period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None):
     """기간에 따른 날짜 범위 계산"""
     end_date = datetime.now()
@@ -459,12 +460,38 @@ def calculate_date_range(period: str, custom_start: Optional[str] = None, custom
     return start_str, end_str
 
 
-def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
+def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str], normalize: bool = False):
     """차트 생성"""
     
     if df.empty:
         st.warning("표시할 데이터가 없습니다.")
         return
+    
+    # 보정 처리
+    if normalize:
+        # 2022년 1월 31일에 해당하는 주차 계산
+        base_date = datetime(2022, 1, 31)
+        base_week = date_to_week_format(base_date)  # 202205 형식
+        
+        # 기준일 데이터로 정규화
+        df_normalized = df.copy()
+        
+        for region in regions:
+            for price_type in df['가격유형'].unique():
+                mask = (df_normalized['지역'] == region) & (df_normalized['가격유형'] == price_type)
+                region_data = df_normalized[mask].copy()
+                
+                if not region_data.empty:
+                    # 2022-01-31에 가장 가까운 날짜 찾기
+                    region_data['날짜_diff'] = abs((region_data['날짜'] - base_date).dt.days)
+                    base_idx = region_data['날짜_diff'].idxmin()
+                    base_value = region_data.loc[base_idx, '지수']
+                    
+                    if base_value and base_value > 0:
+                        # 100 기준으로 정규화
+                        df_normalized.loc[mask, '지수'] = (df_normalized.loc[mask, '지수'] / base_value) * 100
+        
+        df = df_normalized
     
     fig = go.Figure()
     
@@ -483,7 +510,8 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
                     line=dict(width=2),
                     hovertemplate='<b>%{fullData.name}</b><br>' +
                                   '날짜: %{x|%Y-%m-%d}<br>' +
-                                  '지수: %{y:.2f}<extra></extra>'
+                                  ('지수: %{y:.2f}' if normalize else '지수: %{y:.2f}') +
+                                  '<extra></extra>'
                 ))
     
     elif chart_type == "전세":
@@ -501,7 +529,8 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
                     line=dict(width=2),
                     hovertemplate='<b>%{fullData.name}</b><br>' +
                                   '날짜: %{x|%Y-%m-%d}<br>' +
-                                  '지수: %{y:.2f}<extra></extra>'
+                                  ('지수: %{y:.2f}' if normalize else '지수: %{y:.2f}') +
+                                  '<extra></extra>'
                 ))
     
     elif chart_type == "매매/전세":
@@ -518,7 +547,8 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
                     line=dict(width=2, dash='solid'),
                     hovertemplate='<b>%{fullData.name}</b><br>' +
                                   '날짜: %{x|%Y-%m-%d}<br>' +
-                                  '지수: %{y:.2f}<extra></extra>'
+                                  ('지수: %{y:.2f}' if normalize else '지수: %{y:.2f}') +
+                                  '<extra></extra>'
                 ))
             
             # 전세 데이터
@@ -532,7 +562,8 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
                     line=dict(width=2, dash='dot'),
                     hovertemplate='<b>%{fullData.name}</b><br>' +
                                   '날짜: %{x|%Y-%m-%d}<br>' +
-                                  '지수: %{y:.2f}<extra></extra>'
+                                  ('지수: %{y:.2f}' if normalize else '지수: %{y:.2f}') +
+                                  '<extra></extra>'
                 ))
     
     # 레이아웃 설정
@@ -541,10 +572,16 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
     else:
         title = f"{chart_type} 가격지수 추이"
     
+    if normalize:
+        title += " (2022-01-31 = 100 기준)"
+        yaxis_title = "정규화 지수 (2022-01-31 = 100)"
+    else:
+        yaxis_title = "지수"
+    
     fig.update_layout(
         title=title,
         xaxis_title="날짜 (주간)",
-        yaxis_title="지수",
+        yaxis_title=yaxis_title,
         hovermode='x unified',
         height=600,
         legend=dict(
@@ -560,7 +597,7 @@ def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def create_heatmap(df: pd.DataFrame, regions: List[str], chart_type: str):
+def create_heatmap(df: pd.DataFrame, regions: List[str], chart_type: str, mode: str = "누적 변화율"):
     """지역별 시계열 증감률 히트맵"""
     
     if df.empty:
@@ -579,34 +616,43 @@ def create_heatmap(df: pd.DataFrame, regions: List[str], chart_type: str):
         for price_type, suffix in [('매매', '매매 가격지수'), ('전세', '전세 가격지수')]:
             df_type = df[df['가격유형'] == price_type].copy()
             if not df_type.empty:
-                _create_single_heatmap(df_type, regions, f"{suffix} 시계열 히트맵")
+                _create_single_heatmap(df_type, regions, f"{suffix} 시계열 히트맵", mode)
         return
     
-    _create_single_heatmap(df_filtered, regions, f"{title_suffix} 시계열 히트맵")
+    _create_single_heatmap(df_filtered, regions, f"{title_suffix} 시계열 히트맵", mode)
 
 
-def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
+def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str, mode: str = "누적 변화율"):
     """단일 히트맵 생성 (내부 함수)"""
     
     if df.empty:
         st.warning("히트맵을 그릴 데이터가 없습니다.")
         return
     
-    # 각 지역의 최초 지수를 기준으로 변화율 계산
+    # 각 지역의 데이터 처리
     heatmap_data = []
     
     for region in regions:
         region_data = df[df['지역'] == region].sort_values('날짜')
         
         if not region_data.empty and len(region_data) > 0:
-            # 최초 지수
-            base_index = region_data.iloc[0]['지수']
+            region_data = region_data.copy()
             
-            if base_index and base_index > 0:
-                # 각 시점의 변화율 계산
-                region_data = region_data.copy()
-                region_data['변화율'] = ((region_data['지수'] - base_index) / base_index) * 100
+            if mode == "누적 변화율":
+                # 최초 지수 대비 변화율
+                base_index = region_data.iloc[0]['지수']
+                
+                if base_index and base_index > 0:
+                    region_data['변화율'] = ((region_data['지수'] - base_index) / base_index) * 100
+                    region_data['지역'] = region
+                    heatmap_data.append(region_data[['날짜', '지역', '변화율']])
+            
+            else:  # 전주 변동률
+                # 전주 대비 변동률 계산
+                region_data['변화율'] = region_data['지수'].pct_change() * 100
                 region_data['지역'] = region
+                # 첫 번째 값은 NaN이므로 0으로 처리
+                region_data['변화율'] = region_data['변화율'].fillna(0)
                 heatmap_data.append(region_data[['날짜', '지역', '변화율']])
     
     if not heatmap_data:
@@ -624,7 +670,17 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
     
     # 데이터 포인트 수 표시
     total_weeks = len(pivot_df.columns)
-    st.info(f"📅 총 {total_weeks}주 데이터 표시 중")
+    
+    if mode == "누적 변화율":
+        mode_text = "최초 시점 대비"
+        st.info(f"📅 총 {total_weeks}주 데이터 표시 중 (최초 시점 대비 누적 변화율)")
+        zmin, zmax = -10, 10
+        colorbar_title = "누적 변화율(%)"
+    else:  # 전주 변동률
+        mode_text = "전주 대비"
+        st.info(f"📅 총 {total_weeks}주 데이터 표시 중 (전주 대비 변동률)")
+        zmin, zmax = -2, 2  # 전주 변동률은 보통 작은 값
+        colorbar_title = "전주 변동률(%)"
     
     # 히트맵 생성
     fig = go.Figure(data=go.Heatmap(
@@ -633,10 +689,10 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
         y=pivot_df.index,
         colorscale='RdYlGn',  # 빨강(하락)-노랑(중립)-초록(상승)
         zmid=0,  # 0을 중간값으로
-        colorbar=dict(title="변화율(%)"),
-        hovertemplate='지역: %{y}<br>날짜: %{x|%Y-%m-%d}<br>변화율: %{z:.2f}%<extra></extra>',
-        zmin=-10,  # 최소값 (더 명확한 색상 구분)
-        zmax=10,   # 최대값
+        colorbar=dict(title=colorbar_title),
+        hovertemplate='지역: %{y}<br>날짜: %{x|%Y-%m-%d}<br>' + colorbar_title + ': %{z:.2f}%<extra></extra>',
+        zmin=zmin,
+        zmax=zmax,
     ))
     
     # x축 틱 간격 계산 (주 수에 따라 조정)
@@ -648,7 +704,7 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
         dtick = 7 * 24 * 60 * 60 * 1000 * 8  # 8주마다
     
     fig.update_layout(
-        title=title,
+        title=f"{title} ({mode_text})",
         xaxis_title="날짜 (주간)",
         yaxis_title="지역",
         height=max(400, len(regions) * 25),  # 지역 수에 따라 높이 조정
@@ -762,6 +818,23 @@ def main():
         label_visibility="collapsed"
     )
     
+    # 보정 옵션
+    st.sidebar.subheader("⚙️ 차트 옵션")
+    normalize_base = st.sidebar.checkbox(
+        "📐 기준일 보정 (2022-01-31 = 100)",
+        value=False,
+        help="2022년 1월 31일을 100으로 설정하여 지역간 비교를 용이하게 합니다."
+    )
+    
+    # 히트맵 옵션
+    st.sidebar.subheader("🔥 히트맵 옵션")
+    heatmap_mode = st.sidebar.radio(
+        "히트맵 표시 방식",
+        ["누적 변화율", "전주 변동률"],
+        label_visibility="collapsed",
+        help="누적: 최초 대비 변화율 / 전주: 전주 대비 변동률"
+    )
+    
     # 조회 버튼
     st.sidebar.markdown("---")
     
@@ -858,13 +931,16 @@ def main():
         
         with tab1:
             # 차트 표시
-            create_chart(df, chart_type, selected_regions)
+            create_chart(df, chart_type, selected_regions, normalize_base)
         
         with tab2:
             # 증감률 히트맵만 표시
             st.subheader("시계열 증감률 히트맵")
-            st.info("📊 최초 시점 대비 각 시점의 변화율을 색상으로 표시합니다. (빨강: 하락, 초록: 상승)")
-            create_heatmap(df, selected_regions, chart_type)
+            if heatmap_mode == "누적 변화율":
+                st.info("📊 최초 시점 대비 각 시점의 변화율을 색상으로 표시합니다. (빨강: 하락, 초록: 상승)")
+            else:
+                st.info("📊 전주 대비 변동률을 색상으로 표시합니다. (빨강: 하락, 초록: 상승)")
+            create_heatmap(df, selected_regions, chart_type, heatmap_mode)
         
         with tab3:
             # 원본 데이터 표시
