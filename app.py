@@ -332,7 +332,7 @@ class PriceIndexAPI:
             # 주간 데이터 처리
             # API에서 제공한 날짜를 그대로 사용 (주간 데이터의 기준일)
             if 'WRTTIME_IDTFR_ID' in df.columns:
-                df['날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
+                df['날짜'] = pd.to_datetime(df['WRTTIME_DESC'], format='%Y-%m-%d', errors='coerce')
             
             # 숫자 변환
             if 'DTA_VAL' in df.columns:
