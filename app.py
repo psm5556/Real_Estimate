@@ -651,6 +651,10 @@ def main():
     st.title("🏠 부동산 가격지수 대시보드")
     st.markdown("한국 부동산원 주간 매매/전세 가격지수")
     
+    # 현재 날짜 표시
+    current_date = datetime.now()
+    st.caption(f"📅 오늘 날짜: {current_date.strftime('%Y년 %m월 %d일 (%A)')}")
+    
     # API 키 확인
     try:
         api_key = st.secrets["API_KEY"]
@@ -707,14 +711,17 @@ def main():
     if period == "사용자 지정":
         col1, col2 = st.sidebar.columns(2)
         with col1:
+            default_start = datetime.now() - timedelta(days=365)
             custom_start = st.date_input(
                 "시작일",
-                value=datetime.now() - timedelta(days=365)
+                value=default_start,
+                max_value=datetime.now()
             ).strftime('%Y-%m-%d')
         with col2:
             custom_end = st.date_input(
                 "종료일",
-                value=datetime.now()
+                value=datetime.now(),
+                max_value=datetime.now()
             ).strftime('%Y-%m-%d')
     
     # 차트 유형 선택
@@ -727,6 +734,33 @@ def main():
     
     # 조회 버튼
     st.sidebar.markdown("---")
+    
+    # 현재 설정 미리보기
+    if selected_regions:
+        preview_end = datetime.now()
+        if period == "1년":
+            preview_start = preview_end - timedelta(days=365)
+        elif period == "3년":
+            preview_start = preview_end - timedelta(days=365*3)
+        elif period == "5년":
+            preview_start = preview_end - timedelta(days=365*5)
+        elif period == "10년":
+            preview_start = preview_end - timedelta(days=365*10)
+        elif period == "사용자 지정" and custom_start and custom_end:
+            preview_start = datetime.strptime(custom_start, '%Y-%m-%d')
+            preview_end = datetime.strptime(custom_end, '%Y-%m-%d')
+        else:
+            preview_start = preview_end - timedelta(days=365)
+        
+        st.sidebar.info(f"""
+        📅 **조회 기간**  
+        {preview_start.strftime('%Y-%m-%d')} ~ {preview_end.strftime('%Y-%m-%d')}  
+        ({(preview_end - preview_start).days}일)
+        
+        📍 **선택 지역**: {len(selected_regions)}개  
+        📊 **차트**: {chart_type}
+        """)
+    
     query_button = st.sidebar.button("🔍 데이터 조회", type="primary", use_container_width=True)
     
     # 메인 영역
