@@ -1,458 +1,585 @@
+"""
+한국 부동산원 주간 매매/전세 가격지수 대시보드
+"""
+
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os
-from data_collector import RealEstateDataCollector
+import requests
+from typing import Optional, Dict, List
 
 # 페이지 설정
 st.set_page_config(
-    page_title="한국부동산원 주간 가격지표",
+    page_title="부동산 가격지수 대시보드",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 커스텀 CSS
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        padding: 1rem 0;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 0.5rem 0;
-    }
-    .stAlert {
-        margin-top: 1rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# 제목
-st.markdown('<div class="main-header">🏠 한국부동산원 주간 가격지표 대시보드</div>', unsafe_allow_html=True)
-st.markdown("---")
-
-# 데이터 로드 함수
-@st.cache_data(ttl=3600)
-def load_data():
-    """데이터 로드 (캐싱 적용)"""
-    # API 키 확인 (Streamlit Secrets 우선)
-    api_key = None
+class PriceIndexAPI:
+    """부동산 가격지수 API 클래스"""
     
-    # 1. Streamlit Secrets 확인
+    BASE_URL = "https://www.reb.or.kr/r-one/openapi/SttsApiTblData.do"
+    
+    # 통계표 ID
+    STATBL_IDS = {
+        '매매': 'T244183132827305',
+        '전세': 'T247713133046872'
+    }
+    
+    CYCLE_CODE = "WK"  # 주간
+    
+    # 지역코드
+    REGION_CODES = {
+        '전국': '50001',
+        '서울': '50008',
+        '경기': '50016',
+        '인천': '50124',
+        '부산': '50025',
+        '대구': '50150',
+        '광주': '50159',
+        '대전': '50165',
+        '울산': '50171',
+        '세종': '50033',
+        '강원': '50177',
+        '충북': '50185',
+        '충남': '50194',
+        '전북': '50207',
+        '전남': '50216',
+        '경북': '50223',
+        '경남': '50237',
+        '제주': '50250',
+    }
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+    
+    def get_data(
+        self,
+        price_type: str,
+        start_date: str,
+        end_date: str,
+        region_code: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        가격지수 데이터 조회
+        
+        Args:
+            price_type: '매매' or '전세'
+            start_date: 시작일 (YYYYMMDD)
+            end_date: 종료일 (YYYYMMDD)
+            region_code: 지역코드
+        
+        Returns:
+            DataFrame 또는 None
+        """
+        statbl_id = self.STATBL_IDS.get(price_type)
+        if not statbl_id:
+            return None
+        
+        params = {
+            'STATBL_ID': statbl_id,
+            'DTACYCLE_CD': self.CYCLE_CODE,
+            'START_WRTTIME': start_date,
+            'END_WRTTIME': end_date,
+            'Type': 'json',
+            'Key': self.api_key,
+            'pIndex': 1,
+            'pSize': 1000,
+            'CLS_ID': region_code,
+        }
+        
+        try:
+            response = requests.get(self.BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # 에러 체크
+            if 'RESULT' in data:
+                result = data['RESULT']
+                if result['CODE'] != 'INFO-000':
+                    return None
+            
+            # 데이터 추출
+            rows = []
+            if 'SttsApiTblData' in data:
+                stts_data = data['SttsApiTblData']
+                if isinstance(stts_data, list) and len(stts_data) > 1:
+                    if 'row' in stts_data[1]:
+                        rows = stts_data[1]['row']
+                        if not isinstance(rows, list):
+                            rows = [rows]
+            
+            if not rows:
+                return None
+            
+            df = pd.DataFrame(rows)
+            
+            # 날짜 변환
+            if 'WRTTIME_IDTFR_ID' in df.columns:
+                df['날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
+            
+            # 숫자 변환
+            if 'DTA_VAL' in df.columns:
+                df['지수'] = pd.to_numeric(df['DTA_VAL'], errors='coerce')
+            
+            # 필요한 컬럼만 선택
+            df = df[['날짜', '지수']].copy()
+            df['가격유형'] = price_type
+            
+            # 정렬
+            df = df.sort_values('날짜').reset_index(drop=True)
+            
+            return df
+            
+        except Exception as e:
+            st.error(f"데이터 조회 오류: {e}")
+            return None
+    
+    def get_multiple_data(
+        self,
+        price_types: List[str],
+        start_date: str,
+        end_date: str,
+        region_names: List[str]
+    ) -> pd.DataFrame:
+        """
+        여러 지역 및 가격유형 데이터를 한 번에 조회
+        
+        Args:
+            price_types: ['매매', '전세']
+            start_date: 시작일 (YYYYMMDD)
+            end_date: 종료일 (YYYYMMDD)
+            region_names: 지역명 리스트
+        
+        Returns:
+            통합된 DataFrame
+        """
+        all_data = []
+        total_tasks = len(price_types) * len(region_names)
+        current_task = 0
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for region_name in region_names:
+            region_code = self.REGION_CODES.get(region_name)
+            if not region_code:
+                continue
+            
+            for price_type in price_types:
+                current_task += 1
+                status_text.text(f"조회 중... {region_name} {price_type} ({current_task}/{total_tasks})")
+                progress_bar.progress(current_task / total_tasks)
+                
+                df = self.get_data(price_type, start_date, end_date, region_code)
+                
+                if df is not None and not df.empty:
+                    df['지역'] = region_name
+                    all_data.append(df)
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        if all_data:
+            combined = pd.concat(all_data, ignore_index=True)
+            return combined
+        else:
+            return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_data(api_key: str, price_types: List[str], start_date: str, end_date: str, regions: List[str]):
+    """데이터 로드 (캐시 사용)"""
+    api = PriceIndexAPI(api_key)
+    return api.get_multiple_data(price_types, start_date, end_date, regions)
+
+
+def calculate_date_range(period: str, custom_start: Optional[str] = None, custom_end: Optional[str] = None):
+    """기간에 따른 날짜 범위 계산"""
+    end_date = datetime.now()
+    
+    if period == "1년":
+        start_date = end_date - timedelta(days=365)
+    elif period == "3년":
+        start_date = end_date - timedelta(days=365*3)
+    elif period == "5년":
+        start_date = end_date - timedelta(days=365*5)
+    elif period == "10년":
+        start_date = end_date - timedelta(days=365*10)
+    elif period == "사용자 지정":
+        if custom_start and custom_end:
+            start_date = datetime.strptime(custom_start, '%Y-%m-%d')
+            end_date = datetime.strptime(custom_end, '%Y-%m-%d')
+        else:
+            start_date = end_date - timedelta(days=365)
+    else:
+        start_date = end_date - timedelta(days=365)
+    
+    return start_date.strftime('%Y%m%d'), end_date.strftime('%Y%m%d')
+
+
+def create_chart(df: pd.DataFrame, chart_type: str, regions: List[str]):
+    """차트 생성"""
+    
+    if df.empty:
+        st.warning("표시할 데이터가 없습니다.")
+        return
+    
+    fig = go.Figure()
+    
+    if chart_type == "매매":
+        # 매매 지수만
+        df_filtered = df[df['가격유형'] == '매매']
+        
+        for region in regions:
+            region_data = df_filtered[df_filtered['지역'] == region]
+            if not region_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=region_data['날짜'],
+                    y=region_data['지수'],
+                    mode='lines',
+                    name=f"{region} 매매",
+                    line=dict(width=2)
+                ))
+    
+    elif chart_type == "전세":
+        # 전세 지수만
+        df_filtered = df[df['가격유형'] == '전세']
+        
+        for region in regions:
+            region_data = df_filtered[df_filtered['지역'] == region]
+            if not region_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=region_data['날짜'],
+                    y=region_data['지수'],
+                    mode='lines',
+                    name=f"{region} 전세",
+                    line=dict(width=2)
+                ))
+    
+    elif chart_type == "매매/전세":
+        # 매매/전세 비율
+        df_pivot = df.pivot_table(
+            index=['날짜', '지역'],
+            columns='가격유형',
+            values='지수'
+        ).reset_index()
+        
+        if '매매' in df_pivot.columns and '전세' in df_pivot.columns:
+            df_pivot['매매전세비율'] = (df_pivot['매매'] / df_pivot['전세']) * 100
+            
+            for region in regions:
+                region_data = df_pivot[df_pivot['지역'] == region]
+                if not region_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=region_data['날짜'],
+                        y=region_data['매매전세비율'],
+                        mode='lines',
+                        name=f"{region}",
+                        line=dict(width=2)
+                    ))
+    
+    # 레이아웃 설정
+    if chart_type == "매매/전세":
+        title = "매매/전세 비율 추이"
+        yaxis_title = "매매전세비율 (%)"
+    else:
+        title = f"{chart_type} 가격지수 추이"
+        yaxis_title = "지수"
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title="날짜",
+        yaxis_title=yaxis_title,
+        hovermode='x unified',
+        height=600,
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.01
+        ),
+        margin=dict(r=150)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def create_statistics_table(df: pd.DataFrame, regions: List[str]):
+    """통계 테이블 생성"""
+    
+    if df.empty:
+        return
+    
+    stats_list = []
+    
+    for region in regions:
+        region_data = df[df['지역'] == region]
+        
+        for price_type in ['매매', '전세']:
+            type_data = region_data[region_data['가격유형'] == price_type]
+            
+            if not type_data.empty:
+                latest = type_data.iloc[-1]['지수']
+                earliest = type_data.iloc[0]['지수']
+                change = latest - earliest
+                change_pct = (change / earliest) * 100 if earliest != 0 else 0
+                
+                stats_list.append({
+                    '지역': region,
+                    '유형': price_type,
+                    '최초지수': f"{earliest:.2f}",
+                    '최근지수': f"{latest:.2f}",
+                    '변화': f"{change:+.2f}",
+                    '변화율(%)': f"{change_pct:+.2f}%"
+                })
+    
+    if stats_list:
+        stats_df = pd.DataFrame(stats_list)
+        st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+
+def main():
+    """메인 함수"""
+    
+    # 타이틀
+    st.title("🏠 부동산 가격지수 대시보드")
+    st.markdown("한국 부동산원 주간 매매/전세 가격지수")
+    
+    # API 키 확인
     try:
         api_key = st.secrets["API_KEY"]
-    except (KeyError, FileNotFoundError):
-        # 2. 환경변수 확인
-        api_key = os.getenv('API_KEY')
-    
-    if not api_key:
-        st.error("""
-        ### ⚠️ API 키가 설정되지 않았습니다
-        
-        **Streamlit Cloud에서:**
-        1. 앱 대시보드 → ⚙️ Settings → Secrets
-        2. 다음 내용 추가:
+    except Exception:
+        st.error("⚠️ API 키가 설정되지 않았습니다. Streamlit Cloud의 Secrets에 API_KEY를 추가하세요.")
+        st.info("""
+        **Secrets 설정 방법:**
+        1. Streamlit Cloud 대시보드에서 앱 선택
+        2. Settings > Secrets 클릭
+        3. 다음 내용 추가:
         ```
         API_KEY = "your_api_key_here"
         ```
-        
-        **로컬 개발에서:**
-        1. `.env` 파일 생성
-        2. `API_KEY=your_api_key_here` 추가
-        
-        **API 키 발급:**
-        - [한국부동산원 R-ONE](https://www.reb.or.kr/r-one) 접속
-        - Open API → 인증키 발급
         """)
-        return pd.DataFrame()
+        st.stop()
     
-    collector = RealEstateDataCollector(api_key)
+    # 사이드바 설정
+    st.sidebar.header("⚙️ 설정")
     
-    # 로컬 캐시 파일 확인
-    cache_file = 'data/cached_data.csv'
-    use_cache = False
+    # 지역 선택
+    st.sidebar.subheader("📍 지역 선택")
     
-    if os.path.exists(cache_file):
-        # 캐시 파일이 1시간 이내인 경우 사용
-        file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-        if (datetime.now() - file_time).seconds < 3600:
-            use_cache = True
+    region_list = list(PriceIndexAPI.REGION_CODES.keys())
     
-    if use_cache:
-        st.info("📦 캐시된 데이터를 사용합니다.")
-        df = pd.read_csv(cache_file)
-        df['조사일'] = pd.to_datetime(df['조사일'])
+    # 전체 선택 옵션
+    select_all = st.sidebar.checkbox("전체 선택", value=False)
+    
+    if select_all:
+        selected_regions = st.sidebar.multiselect(
+            "지역",
+            options=region_list,
+            default=region_list,
+            label_visibility="collapsed"
+        )
     else:
-        try:
-            with st.spinner('API에서 데이터를 불러오는 중...'):
-                # 주요 지역 데이터 수집
-                sidos = ['전국', '서울', '부산', '대구', '인천', '광주', '대전', '경기']
-                df = collector.fetch_multiple_regions(sidos=sidos, weeks=52)
-                
-                if df.empty:
-                    st.warning("데이터를 불러올 수 없습니다. API 키와 연결을 확인하세요.")
-                    return pd.DataFrame()
-                
-                # 캐시 저장
-                os.makedirs('data', exist_ok=True)
-                df.to_csv(cache_file, index=False, encoding='utf-8-sig')
-                st.success(f"✅ 데이터 로드 완료! ({len(df)} 건)")
-                
-        except Exception as e:
-            st.error(f"❌ 데이터 로드 실패: {str(e)}")
-            st.info("API 키를 확인하거나 한국부동산원 R-ONE에서 인증키를 발급받으세요.")
-            return pd.DataFrame()
-    
-    return df
-
-# 데이터 로드
-with st.spinner('데이터를 불러오는 중...'):
-    df = load_data()
-
-# 사이드바 - 필터링 옵션
-st.sidebar.header("🔍 필터 옵션")
-
-# 시도 선택
-sido_list = ['전체'] + sorted(df['시도'].unique().tolist())
-selected_sido = st.sidebar.selectbox("시도 선택", sido_list)
-
-# 시군구 선택
-if selected_sido != '전체':
-    sigungu_list = ['전체'] + sorted(df[df['시도'] == selected_sido]['시군구'].unique().tolist())
-else:
-    sigungu_list = ['전체']
-selected_sigungu = st.sidebar.selectbox("시군구 선택", sigungu_list)
-
-# 기간 선택
-st.sidebar.header("📅 조회 기간")
-date_range = st.sidebar.slider(
-    "조회할 주 수 선택",
-    min_value=4,
-    max_value=52,
-    value=12,
-    help="최근 몇 주간의 데이터를 조회할지 선택하세요"
-)
-
-# 지표 선택
-st.sidebar.header("📊 표시 지표")
-show_sale = st.sidebar.checkbox("매매가격지수", value=True)
-show_jeonse = st.sidebar.checkbox("전세가격지수", value=True)
-
-# 데이터 필터링
-filtered_df = df.copy()
-
-if selected_sido != '전체':
-    filtered_df = filtered_df[filtered_df['시도'] == selected_sido]
-    
-if selected_sigungu != '전체':
-    filtered_df = filtered_df[filtered_df['시군구'] == selected_sigungu]
-
-# 최근 N주 데이터만 선택
-max_date = filtered_df['조사일'].max()
-min_date = max_date - timedelta(weeks=date_range)
-filtered_df = filtered_df[filtered_df['조사일'] >= min_date]
-
-# 대시보드 메인 영역
-if filtered_df.empty:
-    st.warning("선택한 조건에 해당하는 데이터가 없습니다.")
-else:
-    # 주요 지표 표시
-    col1, col2, col3, col4 = st.columns(4)
-    
-    latest_data = filtered_df[filtered_df['조사일'] == filtered_df['조사일'].max()]
-    
-    with col1:
-        if show_sale:
-            latest_sale_index = latest_data['매매가격지수'].mean()
-            sale_change = latest_data['매매주간변동률'].mean()
-            st.metric(
-                "매매가격지수",
-                f"{latest_sale_index:.2f}",
-                f"{sale_change:+.3f}%",
-                delta_color="normal"
-            )
-    
-    with col2:
-        if show_jeonse:
-            latest_jeonse_index = latest_data['전세가격지수'].mean()
-            jeonse_change = latest_data['전세주간변동률'].mean()
-            st.metric(
-                "전세가격지수",
-                f"{latest_jeonse_index:.2f}",
-                f"{jeonse_change:+.3f}%",
-                delta_color="normal"
-            )
-    
-    with col3:
-        weeks_data = len(filtered_df['조사일'].unique())
-        st.metric(
-            "조회 기간",
-            f"{weeks_data} 주",
-            None
+        selected_regions = st.sidebar.multiselect(
+            "지역",
+            options=region_list,
+            default=['전국', '서울', '경기'],
+            label_visibility="collapsed"
         )
     
-    with col4:
-        regions_count = len(filtered_df[['시도', '시군구']].drop_duplicates())
-        st.metric(
-            "조회 지역 수",
-            f"{regions_count} 개",
-            None
-        )
+    # 기간 선택
+    st.sidebar.subheader("📅 기간 선택")
+    period = st.sidebar.selectbox(
+        "기간",
+        ["1년", "3년", "5년", "10년", "사용자 지정"],
+        label_visibility="collapsed"
+    )
     
-    st.markdown("---")
+    custom_start = None
+    custom_end = None
     
-    # 탭 생성
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 추이 그래프", "📊 변동률 분석", "🗺️ 지역별 비교", "📋 원본 데이터"])
+    if period == "사용자 지정":
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            custom_start = st.date_input(
+                "시작일",
+                value=datetime.now() - timedelta(days=365)
+            ).strftime('%Y-%m-%d')
+        with col2:
+            custom_end = st.date_input(
+                "종료일",
+                value=datetime.now()
+            ).strftime('%Y-%m-%d')
     
-    with tab1:
-        st.subheader("가격지수 추이")
+    # 차트 유형 선택
+    st.sidebar.subheader("📊 차트 유형")
+    chart_type = st.sidebar.radio(
+        "차트",
+        ["매매", "전세", "매매/전세"],
+        label_visibility="collapsed"
+    )
+    
+    # 조회 버튼
+    st.sidebar.markdown("---")
+    query_button = st.sidebar.button("🔍 데이터 조회", type="primary", use_container_width=True)
+    
+    # 메인 영역
+    if not selected_regions:
+        st.info("👈 사이드바에서 지역을 선택하세요.")
+        return
+    
+    if query_button:
+        # 날짜 범위 계산
+        start_date, end_date = calculate_date_range(period, custom_start, custom_end)
         
-        # 시계열 그래프
-        fig = go.Figure()
+        # 가격 유형 결정
+        if chart_type == "매매":
+            price_types = ['매매']
+        elif chart_type == "전세":
+            price_types = ['전세']
+        else:  # 매매/전세
+            price_types = ['매매', '전세']
         
-        # 지역별로 그룹화
-        for region in filtered_df.groupby(['시도', '시군구']):
-            region_name = f"{region[0][0]} {region[0][1]}"
-            region_data = region[1].sort_values('조사일')
+        # 데이터 로드
+        with st.spinner("데이터를 불러오는 중..."):
+            df = load_data(api_key, price_types, start_date, end_date, selected_regions)
+        
+        if df.empty:
+            st.error("조회된 데이터가 없습니다. 기간을 조정하거나 다른 지역을 선택해보세요.")
+            return
+        
+        # 탭 생성
+        tab1, tab2, tab3 = st.tabs(["📈 차트", "📊 통계", "📋 데이터"])
+        
+        with tab1:
+            # 차트 표시
+            create_chart(df, chart_type, selected_regions)
+        
+        with tab2:
+            # 통계 테이블
+            st.subheader("주요 통계")
+            create_statistics_table(df, selected_regions)
             
-            if show_sale:
-                fig.add_trace(go.Scatter(
-                    x=region_data['조사일'],
-                    y=region_data['매매가격지수'],
-                    mode='lines+markers',
-                    name=f"{region_name} - 매매",
-                    line=dict(width=2)
-                ))
+            # 추가 통계
+            if chart_type == "매매/전세":
+                st.subheader("매매/전세 비율 통계")
+                
+                df_pivot = df.pivot_table(
+                    index=['날짜', '지역'],
+                    columns='가격유형',
+                    values='지수'
+                ).reset_index()
+                
+                if '매매' in df_pivot.columns and '전세' in df_pivot.columns:
+                    df_pivot['매매전세비율'] = (df_pivot['매매'] / df_pivot['전세']) * 100
+                    
+                    ratio_stats = []
+                    for region in selected_regions:
+                        region_data = df_pivot[df_pivot['지역'] == region]
+                        if not region_data.empty:
+                            latest_ratio = region_data.iloc[-1]['매매전세비율']
+                            avg_ratio = region_data['매매전세비율'].mean()
+                            max_ratio = region_data['매매전세비율'].max()
+                            min_ratio = region_data['매매전세비율'].min()
+                            
+                            ratio_stats.append({
+                                '지역': region,
+                                '최근비율(%)': f"{latest_ratio:.2f}",
+                                '평균비율(%)': f"{avg_ratio:.2f}",
+                                '최고비율(%)': f"{max_ratio:.2f}",
+                                '최저비율(%)': f"{min_ratio:.2f}"
+                            })
+                    
+                    if ratio_stats:
+                        st.dataframe(pd.DataFrame(ratio_stats), use_container_width=True, hide_index=True)
+        
+        with tab3:
+            # 원본 데이터 표시
+            st.subheader("조회 데이터")
             
-            if show_jeonse:
-                fig.add_trace(go.Scatter(
-                    x=region_data['조사일'],
-                    y=region_data['전세가격지수'],
-                    mode='lines+markers',
-                    name=f"{region_name} - 전세",
-                    line=dict(width=2, dash='dot')
-                ))
-        
-        fig.update_layout(
-            height=500,
-            xaxis_title="조사일",
-            yaxis_title="가격지수",
-            hovermode='x unified',
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
+            # 다운로드 버튼
+            csv = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            st.download_button(
+                label="📥 CSV 다운로드",
+                data=csv,
+                file_name=f"price_index_{start_date}_{end_date}.csv",
+                mime="text/csv"
             )
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+            
+            # 데이터프레임 표시
+            st.dataframe(df, use_container_width=True, height=400)
+            
+            # 데이터 요약
+            st.subheader("데이터 요약")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("총 데이터 수", f"{len(df):,}건")
+            with col2:
+                st.metric("지역 수", f"{df['지역'].nunique()}개")
+            with col3:
+                st.metric("가격유형", f"{df['가격유형'].nunique()}개")
+            with col4:
+                st.metric("기간", f"{(df['날짜'].max() - df['날짜'].min()).days}일")
     
-    with tab2:
-        st.subheader("주간 변동률 분석")
+    else:
+        # 초기 화면
+        st.info("👈 사이드바에서 설정 후 '데이터 조회' 버튼을 클릭하세요.")
+        
+        # 사용 안내
+        st.markdown("---")
+        st.subheader("📖 사용 방법")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            if show_sale:
-                st.write("**매매 변동률**")
-                sale_change_fig = px.bar(
-                    filtered_df.sort_values('조사일'),
-                    x='조사일',
-                    y='매매주간변동률',
-                    color='매매주간변동률',
-                    color_continuous_scale=['red', 'yellow', 'green'],
-                    labels={'매매주간변동률': '변동률 (%)'},
-                    height=400
-                )
-                sale_change_fig.update_layout(showlegend=False)
-                st.plotly_chart(sale_change_fig, use_container_width=True)
+            st.markdown("""
+            **1. 지역 선택**
+            - 원하는 지역을 선택하세요
+            - 전체 선택 체크박스로 모든 지역 선택 가능
+            - 최소 1개 이상 선택 필요
+            
+            **2. 기간 선택**
+            - 1년, 3년, 5년, 10년 중 선택
+            - 사용자 지정으로 원하는 기간 설정 가능
+            """)
         
         with col2:
-            if show_jeonse:
-                st.write("**전세 변동률**")
-                jeonse_change_fig = px.bar(
-                    filtered_df.sort_values('조사일'),
-                    x='조사일',
-                    y='전세주간변동률',
-                    color='전세주간변동률',
-                    color_continuous_scale=['red', 'yellow', 'green'],
-                    labels={'전세주간변동률': '변동률 (%)'},
-                    height=400
-                )
-                jeonse_change_fig.update_layout(showlegend=False)
-                st.plotly_chart(jeonse_change_fig, use_container_width=True)
-        
-        # 통계 요약
-        st.subheader("변동률 통계")
-        stats_col1, stats_col2 = st.columns(2)
-        
-        with stats_col1:
-            if show_sale:
-                st.write("**매매 변동률**")
-                st.write(f"- 평균: {filtered_df['매매주간변동률'].mean():.3f}%")
-                st.write(f"- 최대: {filtered_df['매매주간변동률'].max():.3f}%")
-                st.write(f"- 최소: {filtered_df['매매주간변동률'].min():.3f}%")
-                st.write(f"- 표준편차: {filtered_df['매매주간변동률'].std():.3f}%")
-        
-        with stats_col2:
-            if show_jeonse:
-                st.write("**전세 변동률**")
-                st.write(f"- 평균: {filtered_df['전세주간변동률'].mean():.3f}%")
-                st.write(f"- 최대: {filtered_df['전세주간변동률'].max():.3f}%")
-                st.write(f"- 최소: {filtered_df['전세주간변동률'].min():.3f}%")
-                st.write(f"- 표준편차: {filtered_df['전세주간변동률'].std():.3f}%")
-    
-    with tab3:
-        st.subheader("지역별 가격지수 비교")
-        
-        # 최신 데이터로 지역 비교
-        latest_comparison = filtered_df[filtered_df['조사일'] == filtered_df['조사일'].max()].copy()
-        latest_comparison['지역'] = latest_comparison['시도'] + ' ' + latest_comparison['시군구']
-        
-        comparison_type = st.radio(
-            "비교 지표 선택",
-            ["매매가격지수", "전세가격지수", "매매/전세 비교"],
-            horizontal=True
-        )
-        
-        if comparison_type == "매매가격지수" and show_sale:
-            fig = px.bar(
-                latest_comparison.sort_values('매매가격지수', ascending=True),
-                y='지역',
-                x='매매가격지수',
-                orientation='h',
-                color='매매가격지수',
-                color_continuous_scale='Blues',
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            st.markdown("""
+            **3. 차트 유형**
+            - 매매: 매매 가격지수
+            - 전세: 전세 가격지수
+            - 매매/전세: 매매가격 ÷ 전세가격 비율
             
-        elif comparison_type == "전세가격지수" and show_jeonse:
-            fig = px.bar(
-                latest_comparison.sort_values('전세가격지수', ascending=True),
-                y='지역',
-                x='전세가격지수',
-                orientation='h',
-                color='전세가격지수',
-                color_continuous_scale='Greens',
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-        elif comparison_type == "매매/전세 비교":
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                y=latest_comparison['지역'],
-                x=latest_comparison['매매가격지수'],
-                name='매매',
-                orientation='h',
-                marker=dict(color='lightblue')
-            ))
-            fig.add_trace(go.Bar(
-                y=latest_comparison['지역'],
-                x=latest_comparison['전세가격지수'],
-                name='전세',
-                orientation='h',
-                marker=dict(color='lightgreen')
-            ))
-            fig.update_layout(
-                barmode='group',
-                height=400,
-                xaxis_title="가격지수",
-                yaxis_title="지역"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            **4. 데이터 조회**
+            - '데이터 조회' 버튼 클릭
+            - 차트, 통계, 데이터 탭에서 결과 확인
+            """)
+        
+        st.markdown("---")
+        st.subheader("ℹ️ 정보")
+        st.markdown("""
+        - **데이터 출처**: 한국 부동산원 (R-ONE)
+        - **통계표 ID**: 
+          - 매매: T244183132827305
+          - 전세: T247713133046872
+        - **주기**: 주간
+        - **업데이트**: 매주 (공표 시점에 따라 최신 데이터는 1-2주 지연될 수 있음)
+        """)
     
-    with tab4:
-        st.subheader("원본 데이터")
-        
-        # 데이터 정렬 옵션
-        sort_col = st.selectbox(
-            "정렬 기준",
-            ['조사일', '매매가격지수', '전세가격지수', '매매주간변동률', '전세주간변동률']
-        )
-        sort_order = st.radio("정렬 순서", ['내림차순', '오름차순'], horizontal=True)
-        
-        display_df = filtered_df.sort_values(
-            sort_col, 
-            ascending=(sort_order == '오름차순')
-        )
-        
-        # 데이터 표시
-        st.dataframe(
-            display_df.style.format({
-                '매매가격지수': '{:.2f}',
-                '전세가격지수': '{:.2f}',
-                '매매주간변동률': '{:+.3f}%',
-                '전세주간변동률': '{:+.3f}%'
-            }),
-            use_container_width=True,
-            height=400
-        )
-        
-        # CSV 다운로드
-        csv = display_df.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="📥 CSV 다운로드",
-            data=csv,
-            file_name=f"부동산가격지표_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
-
-# 푸터
-st.markdown("---")
-
-# API 키 설정 상태 확인 및 안내
-api_key_set = False
-try:
-    if st.secrets.get("API_KEY"):
-        api_key_set = True
-except (KeyError, FileNotFoundError):
-    if os.getenv('API_KEY'):
-        api_key_set = True
-
-if not api_key_set:
-    st.warning("""
-        ### ⚠️ API 키를 설정하세요
-        
-        **Streamlit Cloud 배포 시 (권장):**
-        1. 앱 대시보드에서 ⚙️ **Settings** 클릭
-        2. **Secrets** 탭 선택
-        3. 다음 내용 입력:
-        ```toml
-        API_KEY = "발급받은_인증키"
-        ```
-        4. **Save** 클릭
-        
-        **로컬 개발 시:**
-        1. 프로젝트 폴더에 `.env` 파일 생성
-        2. 다음 내용 입력:
-        ```
-        API_KEY=발급받은_인증키
-        ```
-        
-        **API 키 발급 방법:**
-        1. [한국부동산원 R-ONE](https://www.reb.or.kr/r-one) 접속
-        2. 회원가입 후 로그인
-        3. **Open API** → **인증키 발급** 메뉴
-        4. 신청 양식 작성 및 발급
-    """)
-else:
-    st.success("✅ API 키가 설정되었습니다.")
-
-st.markdown("""
-    <div style='text-align: center; color: gray; font-size: 0.9rem; margin-top: 2rem;'>
-        <p>데이터 출처: 한국부동산원 R-ONE Open API | 업데이트: 매주 목요일</p>
+    # 푸터
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("""
+    <div style='text-align: center'>
+    <small>데이터: 한국 부동산원<br>
+    주간 매매/전세 가격지수</small>
     </div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
