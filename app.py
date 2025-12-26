@@ -298,7 +298,7 @@ class PriceIndexAPI:
             'Type': 'json',
             'Key': self.api_key,
             'pIndex': 1,
-            'pSize': 1000,
+            'pSize': 1000,  # 최대 1000개 (1년 = 52주, 여유있게)
             'CLS_ID': region_code,
         }
         
@@ -329,29 +329,26 @@ class PriceIndexAPI:
             
             df = pd.DataFrame(rows)
             
-            # !! 중요: 주간 데이터 처리
-            # API에서 받은 WRTTIME_IDTFR_ID는 해당 주를 대표하는 날짜 (보통 주의 특정 요일)
-            # 주간 데이터이므로 날짜를 그대로 사용 (API가 주 단위로 제공)
+            # 주간 데이터 처리
+            # API에서 제공한 날짜를 그대로 사용 (주간 데이터의 기준일)
             if 'WRTTIME_IDTFR_ID' in df.columns:
                 df['날짜'] = pd.to_datetime(df['WRTTIME_IDTFR_ID'], format='%Y%m%d', errors='coerce')
-                df['연도'] = df['날짜'].dt.isocalendar().year
-                df['주차'] = df['날짜'].dt.isocalendar().week
-                
-                # 중복 데이터 제거 - 같은 연도/주차의 데이터가 여러 개 있을 경우 최신 것만 사용
-                df = df.sort_values('날짜').drop_duplicates(subset=['연도', '주차'], keep='last')
             
             # 숫자 변환
             if 'DTA_VAL' in df.columns:
                 df['지수'] = pd.to_numeric(df['DTA_VAL'], errors='coerce')
             
             # 필요한 컬럼만 선택
-            df = df[['날짜', '지수', '연도', '주차']].copy()
-            df['가격유형'] = price_type
+            result_df = df[['날짜', '지수']].copy()
+            result_df['가격유형'] = price_type
             
-            # 정렬
-            df = df.sort_values('날짜').reset_index(drop=True)
+            # 날짜로 정렬
+            result_df = result_df.sort_values('날짜').reset_index(drop=True)
             
-            return df
+            # 결측값 제거
+            result_df = result_df.dropna(subset=['날짜', '지수'])
+            
+            return result_df
             
         except Exception as e:
             st.error(f"데이터 조회 오류: {e}")
@@ -570,6 +567,7 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
     """단일 히트맵 생성 (내부 함수)"""
     
     if df.empty:
+        st.warning("히트맵을 그릴 데이터가 없습니다.")
         return
     
     # 각 지역의 최초 지수를 기준으로 변화율 계산
@@ -602,6 +600,10 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
     # 지역 순서 유지
     pivot_df = pivot_df.reindex(regions)
     
+    # 데이터 포인트 수 표시
+    total_weeks = len(pivot_df.columns)
+    st.info(f"📅 총 {total_weeks}주 데이터 표시 중")
+    
     # 히트맵 생성
     fig = go.Figure(data=go.Heatmap(
         z=pivot_df.values,
@@ -615,6 +617,14 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
         zmax=10,   # 최대값
     ))
     
+    # x축 틱 간격 계산 (주 수에 따라 조정)
+    if total_weeks <= 12:
+        dtick = 7 * 24 * 60 * 60 * 1000  # 1주마다
+    elif total_weeks <= 52:
+        dtick = 7 * 24 * 60 * 60 * 1000 * 4  # 4주마다
+    else:
+        dtick = 7 * 24 * 60 * 60 * 1000 * 8  # 8주마다
+    
     fig.update_layout(
         title=title,
         xaxis_title="날짜 (주간)",
@@ -623,7 +633,7 @@ def _create_single_heatmap(df: pd.DataFrame, regions: List[str], title: str):
         xaxis={
             'tickformat': '%Y-%m-%d',
             'tickangle': -45,
-            'dtick': 7 * 24 * 60 * 60 * 1000 * 4  # 약 4주마다 표시
+            'dtick': dtick
         },
         margin=dict(l=200, r=50, t=80, b=100)
     )
@@ -740,6 +750,26 @@ def main():
         if df.empty:
             st.error("조회된 데이터가 없습니다. 기간을 조정하거나 다른 지역을 선택해보세요.")
             return
+        
+        # 데이터 정보 표시
+        with st.expander("📊 데이터 조회 정보", expanded=False):
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("총 데이터", f"{len(df):,}건")
+            with col2:
+                st.metric("지역 수", f"{df['지역'].nunique()}개")
+            with col3:
+                date_range = (df['날짜'].max() - df['날짜'].min()).days
+                st.metric("기간", f"{date_range}일")
+            with col4:
+                weeks = len(df) // (df['지역'].nunique() * df['가격유형'].nunique())
+                st.metric("주차", f"약 {weeks}주")
+            
+            # 지역별 데이터 수
+            st.write("**지역별 데이터 수:**")
+            region_counts = df.groupby(['지역', '가격유형']).size().unstack(fill_value=0)
+            st.dataframe(region_counts, use_container_width=True)
         
         # 탭 생성
         tab1, tab2, tab3 = st.tabs(["📈 차트", "📊 통계", "📋 데이터"])
