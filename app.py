@@ -712,7 +712,18 @@ def main():
         selected_regions = st.sidebar.multiselect(
             "지역",
             options=region_list,
-            default=['전국', '서울', '경기'],
+            default=[
+                '서울',
+                '경기',
+                '서울>강남지역',
+                '서울>강북지역',
+                '경기>경부1권>성남시>분당구',
+                '경기>경부2권>수원시>영통구',
+                '경기>경부2권>용인시>수지구',
+                '경기>서해안권>평택시',
+                '인천>연수구',
+                '부산>동부산권>해운대구'
+            ],
             label_visibility="collapsed"
         )
     
